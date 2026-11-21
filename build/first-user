@@ -1,0 +1,47 @@
+#!/bin/bash
+# Runs only on the physically attached console, before the first graphical login.
+set -euo pipefail
+export LC_ALL=C
+state=/var/lib/k4-setup
+install -d -m 0700 "$state"
+if [[ -e $state/user-created ]]; then exit 0; fi
+# Do not start over with a different name after a power loss during passwd.
+if [[ ! -s $state/pending ]]; then
+  while :; do
+    printf '\nLiontron K4 / Ubuntu 22.04 - create the desktop administrator\n'
+    printf 'Username (lowercase a-z, digits, _ or -; start with a letter): '
+    if ! IFS= read -r user; then sleep 2; exit 1; fi
+    if [[ $user =~ ^[a-z][a-z0-9_-]{0,30}$ ]] && ! getent passwd "$user" >/dev/null && ! getent group "$user" >/dev/null; then
+      printf '%s\n' "$user" > "$state/pending.tmp"
+      mv "$state/pending.tmp" "$state/pending"
+      sync -f "$state"
+      break
+    fi
+    printf 'Invalid or already used name. Try again.\n'
+  done
+fi
+IFS= read -r user < "$state/pending"
+[[ $user =~ ^[a-z][a-z0-9_-]{0,30}$ ]]
+if ! id "$user" >/dev/null 2>&1; then
+  adduser --uid 1000 --gecos '' --disabled-password "$user"
+fi
+[[ $(id -u "$user") == 1000 && $(getent passwd "$user" | cut -d: -f6) == "/home/$user" ]]
+[[ -d /home/$user ]] || install -d -m 0700 -o "$user" -g "$(id -gn "$user")" "/home/$user"
+for group in sudo adm audio video render plugdev netdev; do
+  if getent group "$group" >/dev/null; then usermod -a -G "$group" "$user"; fi
+done
+# Log in with a newly chosen password; there is no default or passwordless account.
+if [[ $(passwd -S "$user" | awk '{print $2}') != P ]]; then
+  until passwd "$user"; do
+    printf 'Password not set. Try again.\n'
+    sleep 1
+  done
+fi
+[[ $(passwd -S "$user" | awk '{print $2}') == P ]]
+install -d -m 0700 -o "$user" -g "$(id -gn "$user")" "/home/$user/.config"
+install -m 0600 -o "$user" -g "$(id -gn "$user")" /dev/null "/home/$user/.config/gnome-initial-setup-done"
+runuser -u "$user" -- /usr/local/bin/k4-rdp-tls
+install -m 0600 /dev/null "$state/user-created"
+sync -f "$state"
+rm -f "$state/pending"
+printf 'Setup complete. Starting GNOME login...\n'

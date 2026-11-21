@@ -1,0 +1,25 @@
+#!/bin/bash
+# Run as the desktop user. This prepares TLS only; it does not enable sharing.
+set -euo pipefail
+[[ $EUID != 0 ]] || { echo 'Run as the desktop user' >&2; exit 1; }
+umask 077
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+base=${XDG_DATA_HOME:-$HOME/.local/share}/k4-rdp
+mkdir -p -m 700 "$base"
+exec 9>"$base/.tls.lock"
+flock 9
+if [[ ! -s $base/tls/rdp.crt || ! -s $base/tls/rdp.key ]]; then
+    tmp=$(mktemp -d "$base/.tls.XXXXXXXX")
+    trap 'rm -rf -- "$tmp"' EXIT
+    openssl req -new -newkey rsa:3072 -nodes -x509 -sha256 -days 825 \
+        -subj '/CN=K4 local desktop' -addext 'extendedKeyUsage=serverAuth' \
+        -keyout "$tmp/rdp.key" -out "$tmp/rdp.crt" 2>/dev/null
+    # Stage the key and certificate together so an interrupted first run is safe.
+    rm -rf -- "$base/tls"
+    mv -T -- "$tmp" "$base/tls"
+fi
+if [[ ${1:-} = --configure ]]; then
+    grdctl rdp set-tls-key "$base/tls/rdp.key"
+    grdctl rdp set-tls-cert "$base/tls/rdp.crt"
+fi
+openssl x509 -in "$base/tls/rdp.crt" -noout -fingerprint -sha256

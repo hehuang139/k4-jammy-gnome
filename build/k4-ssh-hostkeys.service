@@ -1,0 +1,9 @@
+[Unit]
+Description=Ensure device-local SSH host keys exist
+Before=ssh.service
+RequiresMountsFor=/etc/ssh
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/ssh-keygen -A
+RemainAfterExit=yes

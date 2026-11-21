@@ -1,0 +1,79 @@
+#!/bin/bash
+# Extend only the mounted, matching image's final partition. No disk scan.
+set -euo pipefail
+export LC_ALL=C PATH=/usr/sbin:/usr/bin:/sbin:/bin
+fail() { echo "k4-grow-root: $*" >&2; exit 1; }
+source /etc/k4-image-layout
+mount_device() {
+    local mm
+    mm=$(findmnt -rn -M "$1" -o MAJ:MIN) || return 1
+    readlink -e "/dev/block/$mm"
+}
+root=$(mount_device /) || fail 'cannot resolve the root block device'
+boot=$(mount_device /boot) || fail 'cannot resolve the boot block device'
+[[ -b $root && -b $boot ]] || fail 'expected separate block mounts'
+[[ $(findmnt -rn -M / -o FSTYPE) = ext4 && $(findmnt -rn -M /boot -o FSTYPE) = ext4 ]] || fail 'expected ext4 on / and /boot'
+[[ ,$(findmnt -rn -M / -o OPTIONS), = *,rw,* ]] || fail '/ is not writable'
+[[ $(blkid -p -s UUID -o value "$root") = "$ROOT_UUID" && $(blkid -p -s UUID -o value "$boot") = "$BOOT_UUID" ]] || fail 'filesystem UUID mismatch'
+rs=/sys/class/block/${root##*/}
+bs=/sys/class/block/${boot##*/}
+[[ $(cat "$rs/partition") = 2 && $(cat "$bs/partition") = 1 ]] || fail 'unexpected partition numbers'
+parent=$(dirname "$(readlink -f "$rs")")
+[[ $parent = "$(dirname "$(readlink -f "$bs")")" ]] || fail '/boot resides on another disk'
+disk=/dev/${parent##*/}
+[[ -b $disk && $(blockdev --getss "$disk") = 512 ]] || fail 'expected a 512-byte logical sector disk'
+[[ $(cat "$rs/start") = "$ROOT_START" && $(cat "$bs/start") = "$BOOT_START" ]] || fail 'kernel partition starts do not match the image'
+exec 9>/run/k4-grow-root.lock
+flock -n 9 || fail 'another grow-root run is active'
+sectors=$(blockdev --getsz "$disk")
+(( sectors >= IMAGE_SECTORS )) || fail 'disk smaller than image'
+
+check_layout() {
+    local table p1 p2
+    table=$(sgdisk -p "$disk")
+    grep -Fxiq "Disk identifier (GUID): $DISK_GUID" <<< "$table" || fail 'GPT disk GUID mismatch'
+    [[ $(awk '/^ *[0-9]+ +[0-9]+ +[0-9]+ /{print $1}' <<< "$table" | xargs) = '1 2' ]] || fail 'expected only boot and root GPT entries'
+    p1=$(sgdisk -i 1 "$disk")
+    p2=$(sgdisk -i 2 "$disk")
+    grep -Fxiq "Partition unique GUID: $BOOT_PARTUUID" <<< "$p1" || fail 'boot PARTUUID mismatch'
+    grep -Fxiq "Partition unique GUID: $ROOT_PARTUUID" <<< "$p2" || fail 'root PARTUUID mismatch'
+    [[ $(awk '/^First sector:/{print $3}' <<< "$p1") = "$BOOT_START" ]] || fail 'boot start mismatch'
+    [[ $(awk '/^Last sector:/{print $3}' <<< "$p1") = "$BOOT_END" && $(awk '/^First sector:/{print $3}' <<< "$p2") = "$ROOT_START" ]] || fail 'partition geometry mismatch'
+    end=$(awk '/^Last sector:/{print $3}' <<< "$p2")
+    [[ $end =~ ^[0-9]+$ ]] || fail 'invalid root end sector'
+    (( end >= ROOT_MIN_END && end < sectors )) || fail 'root geometry outside supported bounds'
+}
+check_gpt() {
+    local result
+    result=$(sgdisk -v "$disk" 2>&1)
+    grep -q '^No problems found\.' <<< "$result" || fail "$result"
+}
+check_layout
+# Primary GPT header's alternate-LBA field is at byte 32. Relocate a short image's
+# known secondary GPT before extending the last GPT entry, even if there is no usable growth.
+primary_alt=$(od --endian=little -An -tu8 -j544 -N8 "$disk" | tr -d '[:space:]')
+if [[ $primary_alt != $((sectors-1)) ]]; then
+    # sgdisk may reconstruct either header from the other. Reject unknown geometry above.
+    sgdisk -e "$disk"
+    check_layout
+fi
+check_gpt
+old_end=$end
+if (( end < sectors - 34 )); then
+    printf 'size=%s\n' "$((sectors - 33 - ROOT_START))" |
+        sfdisk --no-reread --no-tell-kernel -N 2 "$disk"
+    check_layout
+    check_gpt
+    (( end >= old_end )) || fail 'root end moved backwards'
+    (( end == sectors - 34 )) || fail "sfdisk left root short of the last usable sector ($end)"
+fi
+# sgdisk/BLKRRPART may see a mounted partition as busy. Update only its endpoint,
+# and don't grow ext4 unless the kernel reports the exact validated new size.
+expected=$((end - ROOT_START + 1))
+if [[ $(cat "$rs/size") != "$expected" ]]; then
+    partx --update --nr 2 "$disk"
+fi
+[[ $(cat "$rs/start") = "$ROOT_START" && $(cat "$rs/size") = "$expected" ]] || fail 'kernel partition differs from GPT; reboot to continue'
+# Also runs when GPT was expanded on a previous boot but ext4 wasn't yet resized.
+resize2fs "$root"
+echo "k4-grow-root: root=$root sectors=$expected; GPT and ext4 verified/expanded"

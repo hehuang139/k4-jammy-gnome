@@ -1,0 +1,23 @@
+[Unit]
+Description=Create the first local desktop administrator
+ConditionPathExists=!/var/lib/k4-setup/user-created
+After=local-fs.target systemd-user-sessions.service systemd-vconsole-setup.service
+Before=display-manager.service getty.target
+Wants=systemd-user-sessions.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/k4-first-user
+TimeoutStartSec=infinity
+StandardInput=tty-force
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target

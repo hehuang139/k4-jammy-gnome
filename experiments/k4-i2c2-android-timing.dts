@@ -1,0 +1,14 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "rockchip,rk3399";
+    fragment@0 {
+        target-path = "/i2c@ff120000";
+        __overlay__ {
+            clock-frequency = <200000>;
+            i2c-scl-rising-time-ns = <800>;
+            i2c-scl-falling-time-ns = <40>;
+        };
+    };
+};

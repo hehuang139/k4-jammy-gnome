@@ -1,0 +1,14 @@
+[Unit]
+Description=Extend the K4 image root partition and filesystem on the boot disk
+After=local-fs.target
+Before=k4-first-user.service display-manager.service
+ConditionPathExists=/etc/k4-image-layout
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/k4-grow-root
+RemainAfterExit=yes
+TimeoutStartSec=5min
+
+[Install]
+WantedBy=multi-user.target
